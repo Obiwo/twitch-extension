@@ -296,6 +296,7 @@
   // Hilo principal
   // ==========================================================================
   const workers = [];
+  let adsBlocked = 0;
   const gqlHeaders = {
     ClientIntegrityHeader: null,
     AuthorizationHeader: null,
@@ -382,12 +383,14 @@
         super(URL.createObjectURL(blob), options);
 
         workers.push(this);
+        notifyPage({ type: 'worker-hooked' });
         this.addEventListener('message', (event) => {
           const data = event.data;
           if (!data || typeof data !== 'object' || typeof data.key !== 'string' || !data.key.startsWith('Tap')) return;
           switch (data.key) {
             case 'TapAdStarted':
-              notifyPage({ type: 'ad-started', channel: data.channel, isMidroll: !!data.isMidroll });
+              adsBlocked++;
+              notifyPage({ type: 'ad-started', channel: data.channel, isMidroll: !!data.isMidroll, count: adsBlocked });
               break;
             case 'TapAdBackup':
               notifyPage({ type: 'ad-backup', channel: data.channel, playerType: data.playerType, height: data.height, originalHeight: data.originalHeight });
@@ -444,6 +447,15 @@
     };
   }
 
+  // content.js puede cargar después que nosotros; si pregunta, le devolvemos el estado
+  window.addEventListener('message', (event) => {
+    if (event.source !== window) return;
+    const data = event.data;
+    if (!data || data.source !== MESSAGE_SOURCE || data.type !== 'query-state') return;
+    notifyPage({ type: 'adblock-armed', hooked: workers.length > 0, count: adsBlocked });
+  });
+
   hookWorker();
   hookFetch();
+  notifyPage({ type: 'adblock-armed', hooked: false, count: 0 });
 })();

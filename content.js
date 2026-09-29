@@ -18,7 +18,7 @@
   };
 
   // Estado del bloqueo de anuncios (lo alimenta adblock.js vía window.postMessage)
-  const adState = { active: false, isMidroll: false, playerType: null, height: 0, originalHeight: 0 };
+  const adState = { active: false, isMidroll: false, playerType: null, height: 0, originalHeight: 0, count: 0, hooked: false, confirmed: false };
 
   // --------------------------------------------------------------------------
   // Estilos de la ventana flotante (estética Apple: redondeado, cristal, SF)
@@ -439,10 +439,11 @@
   // --------------------------------------------------------------------------
   function adLabel() {
     if (!adState.active) return '';
+    const n = adState.count > 1 ? ' (' + adState.count + ')' : '';
     if (adState.height && adState.originalHeight && adState.height < adState.originalHeight) {
-      return 'Anuncio omitido · ' + adState.height + 'p durante el corte';
+      return 'Anuncio omitido · ' + adState.height + 'p durante el corte' + n;
     }
-    return 'Anuncio omitido';
+    return 'Anuncio omitido' + n;
   }
 
   function renderAdIndicators() {
@@ -455,6 +456,7 @@
 
     if (adState.active) {
       ensurePageStyles();
+      hideStatusToast(); // evitar solape: ambos van arriba a la derecha
       const video = state.video || getVideo();
       const host = state.originalParent || (video && video.parentElement);
       if (!host || !host.isConnected) return;
@@ -476,17 +478,79 @@
     page.adToast = null;
   }
 
+  // Toast efímero de estado (p. ej. "Protección de anuncios activa"): sutil y auto-oculta
+  let statusToastTimer = 0;
+  function showStatusToast(text) {
+    ensurePageStyles();
+    const video = getVideo();
+    const host = state.originalParent || (video && video.parentElement);
+    if (!host || !host.isConnected) return;
+
+    hideStatusToast();
+    const toast = el(document, 'div', 'tap-status-toast', { 'data-tap-status-toast': '1' });
+    toast.appendChild(svgIcon(document, ICONS.shield));
+    const span = el(document, 'span');
+    span.textContent = text;
+    toast.appendChild(span);
+    host.appendChild(toast);
+    page.statusToast = toast;
+
+    // Forzar reflow para que la transición de entrada se aplique
+    void toast.offsetWidth;
+    toast.classList.add('visible');
+    clearTimeout(statusToastTimer);
+    statusToastTimer = setTimeout(() => {
+      if (!page.statusToast) return;
+      page.statusToast.classList.remove('visible');
+      const node = page.statusToast;
+      setTimeout(() => { if (node.parentNode) node.parentNode.removeChild(node); }, 400);
+      page.statusToast = null;
+    }, 3500);
+  }
+
+  function hideStatusToast() {
+    clearTimeout(statusToastTimer);
+    if (page.statusToast && page.statusToast.parentNode) page.statusToast.parentNode.removeChild(page.statusToast);
+    page.statusToast = null;
+  }
+
+  function confirmProtectionActive() {
+    if (adState.confirmed) return;
+    adState.confirmed = true;
+    // Esperar a que exista el reproductor para anclar el toast
+    let tries = 0;
+    const tick = () => {
+      const video = getVideo();
+      const host = state.originalParent || (video && video.parentElement);
+      if (host && host.isConnected) {
+        showStatusToast('Protección de anuncios activa');
+      } else if (tries++ < 40) {
+        setTimeout(tick, 500);
+      }
+    };
+    tick();
+  }
+
   window.addEventListener('message', (event) => {
     if (event.source !== window) return;
     const data = event.data;
     if (!data || data.source !== 'twitch-auto-pip' || typeof data.type !== 'string') return;
     switch (data.type) {
+      case 'adblock-armed':
+        if (typeof data.count === 'number') adState.count = data.count;
+        if (data.hooked) { adState.hooked = true; confirmProtectionActive(); }
+        return;
+      case 'worker-hooked':
+        adState.hooked = true;
+        confirmProtectionActive();
+        return;
       case 'ad-started':
         adState.active = true;
         adState.isMidroll = !!data.isMidroll;
         adState.playerType = null;
         adState.height = 0;
         adState.originalHeight = 0;
+        if (typeof data.count === 'number') adState.count = data.count;
         break;
       case 'ad-backup':
         adState.active = true;
@@ -505,6 +569,11 @@
     }
     renderAdIndicators();
   });
+
+  // Preguntar el estado por si adblock.js se armó antes de que cargáramos
+  try {
+    window.postMessage({ source: 'twitch-auto-pip', type: 'query-state' }, location.origin);
+  } catch (_) { /* ignorar */ }
 
   // --------------------------------------------------------------------------
   // Integración en la página de Twitch: botón en el reproductor, aviso y atajo
@@ -561,11 +630,28 @@
     }
     .tap-ad-toast svg { width: 15px; height: 15px; fill: #fff; }
     @keyframes tap-toast-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+
+    .tap-status-toast {
+      position: absolute; top: 14px; right: 14px; z-index: 6;
+      height: 30px; padding: 0 13px 0 10px; border-radius: 999px;
+      display: flex; align-items: center; gap: 7px; pointer-events: none;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Inter, system-ui, sans-serif;
+      font-size: 12.5px; font-weight: 600; letter-spacing: .01em; color: #fff;
+      background: rgba(28,28,30,.55);
+      -webkit-backdrop-filter: blur(24px) saturate(180%);
+      backdrop-filter: blur(24px) saturate(180%);
+      border: 1px solid rgba(255,255,255,.16);
+      box-shadow: 0 8px 30px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.12);
+      opacity: 0; transform: translateY(-6px);
+      transition: opacity .35s cubic-bezier(.2,.8,.2,1), transform .35s cubic-bezier(.2,.8,.2,1);
+    }
+    .tap-status-toast.visible { opacity: 1; transform: none; }
+    .tap-status-toast svg { width: 15px; height: 15px; fill: #34c759; }
   `;
 
   const PIP_ICON = 'M19 11h-8v6h8v-6zm4 8V4.98C23 3.88 22.1 3 21 3H3c-1.1 0-2 .88-2 1.98V19c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2zm-2 .02H3V4.97h18v14.05z';
 
-  const page = { styles: null, button: null, notice: null, adToast: null, observer: null };
+  const page = { styles: null, button: null, notice: null, adToast: null, statusToast: null, observer: null };
 
   function ensurePageStyles() {
     if (page.styles && page.styles.isConnected) return;
