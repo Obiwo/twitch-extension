@@ -14,7 +14,11 @@
     originalParent: null,
     opening: false,
     cleanup: [],
+    pipAdBadge: null,
   };
+
+  // Estado del bloqueo de anuncios (lo alimenta adblock.js vía window.postMessage)
+  const adState = { active: false, isMidroll: false, playerType: null, height: 0, originalHeight: 0 };
 
   // --------------------------------------------------------------------------
   // Estilos de la ventana flotante (estética Apple: redondeado, cristal, SF)
@@ -130,7 +134,20 @@
       0%, 100% { box-shadow: 0 0 0 3px rgba(255,59,48,.25); }
       50%      { box-shadow: 0 0 0 6px rgba(255,59,48,.06); }
     }
-    @media (max-width: 320px) { .vol-label, .topbar { display: none; } }
+    .ad-badge {
+      position: absolute; top: 12px; right: 12px;
+      height: 28px; padding: 0 12px 0 9px; border-radius: 999px;
+      display: flex; align-items: center; gap: 7px;
+      font-size: 12px; font-weight: 600; letter-spacing: .01em;
+      color: #fff; background: rgba(52,199,89,.28);
+      border-color: rgba(52,199,89,.45);
+      opacity: 0; transform: translateY(-6px); pointer-events: none;
+      transition: opacity .3s, transform .3s cubic-bezier(.2,.8,.2,1);
+    }
+    .ad-badge.visible { opacity: 1; transform: none; }
+    .ad-badge svg { width: 15px; height: 15px; fill: #fff; }
+
+    @media (max-width: 320px) { .vol-label, .topbar, .ad-badge { display: none; } }
     @media (max-height: 200px) { .topbar { display: none; } }
   `;
 
@@ -139,6 +156,7 @@
     pause: 'M6 5h4v14H6zM14 5h4v14h-4z',
     volHigh: 'M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05A4.5 4.5 0 0 0 16.5 12zM14 3.23v2.06a7 7 0 0 1 0 13.42v2.06a9 9 0 0 0 0-17.54z',
     volLow: 'M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05A4.5 4.5 0 0 0 16.5 12z',
+    shield: 'M12 1 3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm-2 16-4-4 1.41-1.41L10 14.17l6.59-6.59L18 9l-8 8z',
     volMute: 'M16.5 12A4.5 4.5 0 0 0 14 7.97v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51A8.8 8.8 0 0 0 21 12a9 9 0 0 0-7-8.77v2.06A7 7 0 0 1 19 12zM4.27 3 3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a8.9 8.9 0 0 0 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4 9.91 6.09 12 8.18V4z',
   };
 
@@ -217,6 +235,13 @@
     topbar.appendChild(channel);
     overlay.appendChild(topbar);
 
+    // Badge de anuncio bloqueado (independiente del overlay para que siempre se vea)
+    const adBadge = el(doc, 'div', 'ad-badge glass');
+    adBadge.appendChild(svgIcon(doc, ICONS.shield));
+    const adBadgeText = el(doc, 'span');
+    adBadge.appendChild(adBadgeText);
+    state.pipAdBadge = { root: adBadge, text: adBadgeText };
+
     const controls = el(doc, 'div', 'controls glass');
 
     const playBtn = el(doc, 'button', 'btn', { type: 'button', 'aria-label': 'Reproducir / Pausar' });
@@ -248,7 +273,9 @@
 
     doc.body.appendChild(stage);
     doc.body.appendChild(overlay);
+    doc.body.appendChild(adBadge);
     doc.body.appendChild(hud);
+    renderAdIndicators();
 
     // Mover el <video> real de Twitch a la ventana flotante (mantiene la reproducción)
     state.originalParent = video.parentNode;
@@ -403,8 +430,81 @@
     state.placeholder = null;
     state.originalParent = null;
     state.originalStyle = null;
+    state.pipAdBadge = null;
     updatePlayerButton();
   }
+
+  // --------------------------------------------------------------------------
+  // Indicadores de anuncio bloqueado (página + ventana PiP)
+  // --------------------------------------------------------------------------
+  function adLabel() {
+    if (!adState.active) return '';
+    if (adState.height && adState.originalHeight && adState.height < adState.originalHeight) {
+      return 'Anuncio omitido · ' + adState.height + 'p durante el corte';
+    }
+    return 'Anuncio omitido';
+  }
+
+  function renderAdIndicators() {
+    const label = adLabel();
+
+    if (state.pipAdBadge) {
+      state.pipAdBadge.text.textContent = label;
+      state.pipAdBadge.root.classList.toggle('visible', adState.active);
+    }
+
+    if (adState.active) {
+      ensurePageStyles();
+      const video = state.video || getVideo();
+      const host = state.originalParent || (video && video.parentElement);
+      if (!host || !host.isConnected) return;
+      if (!page.adToast || !page.adToast.isConnected || page.adToast.parentElement !== host) {
+        hideAdToast();
+        page.adToast = el(document, 'div', 'tap-ad-toast', { 'data-tap-ad-toast': '1' });
+        page.adToast.appendChild(svgIcon(document, ICONS.shield));
+        page.adToast.appendChild(el(document, 'span'));
+        host.appendChild(page.adToast);
+      }
+      page.adToast.querySelector('span').textContent = label;
+    } else {
+      hideAdToast();
+    }
+  }
+
+  function hideAdToast() {
+    if (page.adToast && page.adToast.parentNode) page.adToast.parentNode.removeChild(page.adToast);
+    page.adToast = null;
+  }
+
+  window.addEventListener('message', (event) => {
+    if (event.source !== window) return;
+    const data = event.data;
+    if (!data || data.source !== 'twitch-auto-pip' || typeof data.type !== 'string') return;
+    switch (data.type) {
+      case 'ad-started':
+        adState.active = true;
+        adState.isMidroll = !!data.isMidroll;
+        adState.playerType = null;
+        adState.height = 0;
+        adState.originalHeight = 0;
+        break;
+      case 'ad-backup':
+        adState.active = true;
+        adState.playerType = data.playerType || null;
+        adState.height = Number(data.height) || 0;
+        adState.originalHeight = Number(data.originalHeight) || 0;
+        break;
+      case 'ad-ended':
+        adState.active = false;
+        adState.playerType = null;
+        adState.height = 0;
+        adState.originalHeight = 0;
+        break;
+      default:
+        return;
+    }
+    renderAdIndicators();
+  });
 
   // --------------------------------------------------------------------------
   // Integración en la página de Twitch: botón en el reproductor, aviso y atajo
@@ -445,11 +545,27 @@
     .tap-pip-notice__card svg { width: 36px; height: 36px; fill: #fff; opacity: .9; }
     .tap-pip-notice__title { font-size: 15px; font-weight: 600; letter-spacing: .01em; }
     .tap-pip-notice__hint { font-size: 12px; opacity: .7; }
+
+    .tap-ad-toast {
+      position: absolute; top: 14px; right: 14px; z-index: 6;
+      height: 30px; padding: 0 13px 0 10px; border-radius: 999px;
+      display: flex; align-items: center; gap: 7px; pointer-events: none;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", Inter, system-ui, sans-serif;
+      font-size: 12.5px; font-weight: 600; letter-spacing: .01em; color: #fff;
+      background: rgba(52,199,89,.28);
+      -webkit-backdrop-filter: blur(24px) saturate(180%);
+      backdrop-filter: blur(24px) saturate(180%);
+      border: 1px solid rgba(52,199,89,.45);
+      box-shadow: 0 8px 30px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.12);
+      animation: tap-toast-in .3s cubic-bezier(.2,.8,.2,1);
+    }
+    .tap-ad-toast svg { width: 15px; height: 15px; fill: #fff; }
+    @keyframes tap-toast-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
   `;
 
   const PIP_ICON = 'M19 11h-8v6h8v-6zm4 8V4.98C23 3.88 22.1 3 21 3H3c-1.1 0-2 .88-2 1.98V19c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2zm-2 .02H3V4.97h18v14.05z';
 
-  const page = { styles: null, button: null, notice: null, observer: null };
+  const page = { styles: null, button: null, notice: null, adToast: null, observer: null };
 
   function ensurePageStyles() {
     if (page.styles && page.styles.isConnected) return;

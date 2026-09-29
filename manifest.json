@@ -12,6 +12,12 @@
   "content_scripts": [
     {
       "matches": ["https://www.twitch.tv/*"],
+      "js": ["adblock.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://www.twitch.tv/*"],
       "js": ["content.js"],
       "run_at": "document_idle"
     }
